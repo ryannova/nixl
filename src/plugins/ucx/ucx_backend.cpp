@@ -31,6 +31,86 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include <asio.hpp>
+#include <fstream>
+#include <mutex>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+
+namespace {
+    struct AgentInfo {
+        std::string uuid = "";
+        std::string ip = "unknown";
+        int rank = -1;
+        int physical_gpu = -1;
+    };
+
+    AgentInfo parseAgentName(const std::string& name) {
+        AgentInfo info;
+        std::vector<std::string> parts;
+        std::stringstream ss(name);
+        std::string item;
+        while (std::getline(ss, item, ':')) {
+            parts.push_back(item);
+        }
+        if (parts.size() >= 3) {
+            info.uuid = parts[0];
+            info.ip = parts[1];
+            try {
+                info.rank = std::stoi(parts[2]);
+            } catch (...) {
+                info.rank = -1;
+            }
+            if (parts.size() >= 4) {
+                try {
+                    info.physical_gpu = std::stoi(parts[3]);
+                } catch (...) {
+                    info.physical_gpu = -1;
+                }
+            }
+        } else {
+            info.uuid = name;
+        }
+        return info;
+    }
+
+    std::string get_current_timestamp() {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+
+        struct tm buf;
+        localtime_r(&in_time_t, &buf);
+
+        std::stringstream ss;
+        ss << std::put_time(&buf, "%Y-%m-%d %H:%M:%S")
+           << '.' << std::setfill('0') << std::setw(3) << ms.count();
+        return ss.str();
+    }
+
+    void log_nixl_telemetry(const std::string& msg) {
+        const char *telemetry_env_val = std::getenv("NIXL_TELEMETRY_ENABLE");
+        if (!telemetry_env_val) return;
+        if (strcasecmp(telemetry_env_val, "y") && strcasecmp(telemetry_env_val, "1") &&
+            strcasecmp(telemetry_env_val, "yes") && strcasecmp(telemetry_env_val, "on")) {
+            return;
+        }
+        const char *telemetry_env_dir = std::getenv("NIXL_TELEMETRY_DIR");
+        std::string dir = telemetry_env_dir ? telemetry_env_dir : "./";
+        std::string filepath = dir + "/nixl_telemetry.log";
+
+        static std::mutex log_mutex;
+        std::lock_guard<std::mutex> lock(log_mutex);
+        std::ofstream outfile;
+        outfile.open(filepath, std::ios_base::app);
+        if (outfile.is_open()) {
+            std::string ts = get_current_timestamp();
+            outfile << "[" << ts << "] " << msg;
+            outfile.close();
+        }
+    }
+}
 
 /****************************************
  * Backend request management
@@ -75,6 +155,13 @@ public:
     };
 
     std::optional<Notif> notif;
+
+    std::chrono::steady_clock::time_point startTime;
+    bool startTimeInitialized = false;
+    size_t totalBytes = 0;
+    ucx_connection_ptr_t conn = nullptr;
+    bool logged = false;
+    bool isChunk = false;
 
     nixlUcxBackendReqH(nixlUcxWorker *worker, size_t worker_id)
         : worker_(worker),
@@ -134,6 +221,19 @@ public:
     status() {
         if (requests_.empty()) {
             /* No pending transmissions */
+            if (startTimeInitialized && !logged && !isChunk) {
+                logged = true;
+                uint64_t duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - startTime).count();
+
+                char log_buf[256];
+                snprintf(log_buf, sizeof(log_buf),
+                         "[TRANSFER] conn_ptr=%p bytes=%zu duration_ns=%llu\n",
+                         (void*)conn.get(),
+                         totalBytes,
+                         (unsigned long long)duration);
+                log_nixl_telemetry(log_buf);
+            }
             connections_.clear();
             return NIXL_SUCCESS;
         }
@@ -171,6 +271,19 @@ public:
 
         requests_.resize(incomplete_reqs);
         if (requests_.empty()) {
+            if (out_ret == NIXL_SUCCESS && startTimeInitialized && !logged && !isChunk) {
+                logged = true;
+                uint64_t duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - startTime).count();
+
+                char log_buf[256];
+                snprintf(log_buf, sizeof(log_buf),
+                         "[TRANSFER] conn_ptr=%p bytes=%zu duration_ns=%llu\n",
+                         (void*)conn.get(),
+                         totalBytes,
+                         (unsigned long long)duration);
+                log_nixl_telemetry(log_buf);
+            }
             connections_.clear();
         }
         return out_ret;
@@ -516,6 +629,7 @@ public:
     startChunk(size_t idx, nixlUcxWorker *worker, size_t worker_id) {
         nixlUcxChunkBackendReqH *chunk = &sharedState_->chunks[idx];
         chunk->startXfer(sharedState_, worker, worker_id);
+        chunk->isChunk = true;
         return chunk;
     }
 
@@ -550,7 +664,21 @@ public:
             return status;
         }
 
-        return sharedState_->status.load();
+        nixl_status_t final_status = sharedState_->status.load();
+        if (final_status == NIXL_SUCCESS && startTimeInitialized && !logged) {
+            logged = true;
+            uint64_t duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - startTime).count();
+
+            char log_buf[256];
+            snprintf(log_buf, sizeof(log_buf),
+                     "[TRANSFER] conn_ptr=%p bytes=%zu duration_ns=%llu\n",
+                     (void*)conn.get(),
+                     totalBytes,
+                     (unsigned long long)duration);
+            log_nixl_telemetry(log_buf);
+        }
+        return final_status;
     }
 
     friend std::ostream &
@@ -717,6 +845,19 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
     const auto comp_handle = static_cast<nixlUcxCompositeBackendReqH *>(int_handle);
     comp_handle->startXfer();
+
+    // Initialize telemetry
+    comp_handle->startTime = std::chrono::steady_clock::now();
+    comp_handle->startTimeInitialized = true;
+    comp_handle->totalBytes = 0;
+    for (int i = 0; i < local.descCount(); i++) {
+        comp_handle->totalBytes += local[i].len;
+    }
+    if (remote.descCount() > 0) {
+        auto rmd = (nixlUcxPublicMetadata*) remote[0].metadataP;
+        comp_handle->conn = rmd->conn;
+    }
+
     size_t chunk_size = comp_handle->getChunkSize();
     NIXL_TRACE << "sending " << *comp_handle;
 
@@ -917,6 +1058,21 @@ nixl_status_t nixlUcxEngine::loadRemoteConnInfo (const std::string &remote_agent
     }
 
     remoteConnMap.insert({remote_agent, conn});
+
+    // Log CONN_INIT
+    AgentInfo local_info = parseAgentName(localAgent);
+    AgentInfo remote_info = parseAgentName(remote_agent);
+
+    char log_buf[512];
+    snprintf(log_buf, sizeof(log_buf),
+             "[CONN_INIT] conn_ptr=%p local_gpu_rank=%d local_physical_gpu=%d -> remote_host=%s remote_gpu_rank=%d remote_physical_gpu=%d\n",
+             (void*)conn.get(),
+             local_info.rank,
+             local_info.physical_gpu,
+             remote_info.ip.c_str(),
+             remote_info.rank,
+             remote_info.physical_gpu);
+    log_nixl_telemetry(log_buf);
 
     return NIXL_SUCCESS;
 }
@@ -1210,6 +1366,21 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
                              size_t start_idx,
                              size_t end_idx) const {
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
+    
+    // Initialize telemetry
+    if (!int_handle->startTimeInitialized && !int_handle->isChunk) {
+        int_handle->startTime = std::chrono::steady_clock::now();
+        int_handle->startTimeInitialized = true;
+        int_handle->totalBytes = 0;
+        for (size_t i = start_idx; i < end_idx; i++) {
+            int_handle->totalBytes += local[i].len;
+        }
+        if (remote.descCount() > 0) {
+            auto rmd = (nixlUcxPublicMetadata*) remote[0].metadataP;
+            int_handle->conn = rmd->conn;
+        }
+    }
+
     const size_t worker_id = int_handle->getWorkerId();
 
     if (operation != NIXL_WRITE && operation != NIXL_READ) {
