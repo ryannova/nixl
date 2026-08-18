@@ -23,7 +23,8 @@ ucx_backend_sources = ['config.cpp',
                        'ucx_backend.cpp',
                        'ucx_enums.cpp',
                        'ucx_plugin.cpp',
-                       'ucx_utils.cpp']
+                       'ucx_utils.cpp',
+                       'ucx_platform_config.cpp']
 
 ucx_backend_dependencies = [asio_dep,
                             nixl_common_dep,

@@ -28,6 +28,7 @@
 
 #include "common/hw_info.h"
 #include "common/nixl_log.h"
+#include "ucx_platform_config.h"
 #include "config.h"
 #include "serdes/serdes.h"
 
@@ -444,6 +445,9 @@ nixlUcxContext::nixlUcxContext(const std::vector<std::string> &devs,
         NIXL_WARN << "UCX version is less than 1.19, CUDA support is limited, "
                   << "including the lack of support for multi-GPU within a single process.";
     }
+
+    // Evaluate generic platform configurations before UCP init
+    nixl::ucx::applyPlatformSpecificFlags(config);
 
     std::string elem;
     std::stringstream stream(engine_config);
