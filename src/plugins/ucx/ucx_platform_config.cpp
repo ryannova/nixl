@@ -11,16 +11,6 @@ namespace nixl::ucx {
 
 enum { kMaxPathLength = 512, kMaxSysfsPathLength = 560, kMaxVendorLength = 32 };
 
-// PCI Device ID Tables
-const char* const kNvidiaVendorId = "0x10de";
-const char* const kA3Id = "0x2331";      // A3
-const char* const kA3MId = "0x2330";     // A3 Mega
-const char* const kA3UId = "0x2335";     // A3 Ultra
-const char* const kA4Id = "0x2901";      // A4
-const char* const kA4XId = "0x2941";     // A4X
-const char* const kA4XMaxId = "0x31c2";  // A4Xmax
-const char* const kA5XId = "0x3041";     // A5X
-
 static int ReadSysfsFile(const char* path, char* out_value, size_t out_size) {
     FILE* file = fopen(path, "r");
     if (file == NULL) {
@@ -46,7 +36,7 @@ static int ReadSysfsFile(const char* path, char* out_value, size_t out_size) {
     return (len > 0);
 }
 
-static GCPPlatform DetectPlatformViaSysfs() {
+static GCPPlatform::Type DetectPlatformViaSysfs() {
     const char* pci_path = "/sys/bus/pci/devices";
     DIR* dir = opendir(pci_path);
     if (dir == NULL) {
@@ -54,7 +44,7 @@ static GCPPlatform DetectPlatformViaSysfs() {
     }
 
     struct dirent* entry;
-    GCPPlatform detected_platform = GCPPlatform::UNKNOWN;
+    GCPPlatform::Type detected_platform = GCPPlatform::UNKNOWN;
 
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type != DT_DIR && entry->d_type != DT_LNK) {
@@ -71,7 +61,7 @@ static GCPPlatform DetectPlatformViaSysfs() {
             continue;
         }
 
-        if (strcmp(vendor, kNvidiaVendorId) != 0) {
+        if (strcmp(vendor, GCPPlatform::kNvidiaVendorId) != 0) {
             continue;
         }
 
@@ -82,13 +72,13 @@ static GCPPlatform DetectPlatformViaSysfs() {
             continue;
         }
 
-        if (strcmp(device, kA3Id) == 0) { detected_platform = GCPPlatform::A3_HIGH; break; }
-        else if (strcmp(device, kA3MId) == 0) { detected_platform = GCPPlatform::A3_MEGA; break; }
-        else if (strcmp(device, kA3UId) == 0) { detected_platform = GCPPlatform::A3_ULTRA; break; }
-        else if (strcmp(device, kA4Id) == 0) { detected_platform = GCPPlatform::A4; break; }
-        else if (strcmp(device, kA4XId) == 0) { detected_platform = GCPPlatform::A4X; break; }
-        else if (strcmp(device, kA4XMaxId) == 0) { detected_platform = GCPPlatform::A4X_MAX; break; }
-        else if (strcmp(device, kA5XId) == 0) { detected_platform = GCPPlatform::A5X; break; }
+        if (strcmp(device, GCPPlatform::kA3Id) == 0) { detected_platform = GCPPlatform::A3_HIGH; break; }
+        else if (strcmp(device, GCPPlatform::kA3MId) == 0) { detected_platform = GCPPlatform::A3_MEGA; break; }
+        else if (strcmp(device, GCPPlatform::kA3UId) == 0) { detected_platform = GCPPlatform::A3_ULTRA; break; }
+        else if (strcmp(device, GCPPlatform::kA4Id) == 0) { detected_platform = GCPPlatform::A4; break; }
+        else if (strcmp(device, GCPPlatform::kA4XId) == 0) { detected_platform = GCPPlatform::A4X; break; }
+        else if (strcmp(device, GCPPlatform::kA4XMaxId) == 0) { detected_platform = GCPPlatform::A4X_MAX; break; }
+        else if (strcmp(device, GCPPlatform::kA5XId) == 0) { detected_platform = GCPPlatform::A5X; break; }
     }
     closedir(dir);
     return detected_platform;
@@ -101,7 +91,7 @@ void applyPlatformSpecificFlags(const config& config) {
     std::string sys_vendor;
     if (std::getline(sys_vendor_file, sys_vendor)) {
         if (sys_vendor.find("Google") != std::string::npos) {
-            GCPPlatform plat = DetectPlatformViaSysfs();
+            GCPPlatform::Type plat = DetectPlatformViaSysfs();
             if (plat != GCPPlatform::UNKNOWN) {
                 NIXL_DEBUG << "Detected GCP platform via sysfs, applying UCX overrides.";
                 auto it = gcp_platform_config.find(plat);
