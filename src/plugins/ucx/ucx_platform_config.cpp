@@ -6,7 +6,6 @@
 #include <dirent.h>
 #include <string.h>
 #include <ctype.h>
-#include <cstdlib>
 
 namespace nixl::ucx {
 
@@ -72,8 +71,7 @@ static GCPPlatform DetectPlatformViaSysfs() {
         }
 
         // Check if it is an Nvidia device
-        int vendor_id = strtol(vendor, NULL, 16);
-        if (vendor_id != GCPPlatformId::kNvidiaVendorId) {
+        if (strcmp(vendor, GCPPlatformId::kNvidiaVendorId) != 0) {
             continue;
         }
 
@@ -86,21 +84,13 @@ static GCPPlatform DetectPlatformViaSysfs() {
         }
 
         // Determine specific platform based on known PCI tables
-        int device_id = strtol(device, NULL, 16);
-        switch (device_id) {
-            case GCPPlatformId::kA3Id:      detected_platform = GCPPlatform::A3_HIGH; break;
-            case GCPPlatformId::kA3MId:     detected_platform = GCPPlatform::A3_MEGA; break;
-            case GCPPlatformId::kA3UId:     detected_platform = GCPPlatform::A3_ULTRA; break;
-            case GCPPlatformId::kA4Id:      detected_platform = GCPPlatform::A4; break;
-            case GCPPlatformId::kA4XId:     detected_platform = GCPPlatform::A4X; break;
-            case GCPPlatformId::kA4XMaxId:  detected_platform = GCPPlatform::A4X_MAX; break;
-            case GCPPlatformId::kA5XId:     detected_platform = GCPPlatform::A5X; break;
-            default: break;
-        }
-
-        if (detected_platform != GCPPlatform::UNKNOWN) {
-            break;
-        }
+        if (strcmp(device, GCPPlatformId::kA3Id) == 0) { detected_platform = GCPPlatform::A3_HIGH; break; }
+        else if (strcmp(device, GCPPlatformId::kA3MId) == 0) { detected_platform = GCPPlatform::A3_MEGA; break; }
+        else if (strcmp(device, GCPPlatformId::kA3UId) == 0) { detected_platform = GCPPlatform::A3_ULTRA; break; }
+        else if (strcmp(device, GCPPlatformId::kA4Id) == 0) { detected_platform = GCPPlatform::A4; break; }
+        else if (strcmp(device, GCPPlatformId::kA4XId) == 0) { detected_platform = GCPPlatform::A4X; break; }
+        else if (strcmp(device, GCPPlatformId::kA4XMaxId) == 0) { detected_platform = GCPPlatform::A4X_MAX; break; }
+        else if (strcmp(device, GCPPlatformId::kA5XId) == 0) { detected_platform = GCPPlatform::A5X; break; }
     }
     closedir(dir);
     return detected_platform;
