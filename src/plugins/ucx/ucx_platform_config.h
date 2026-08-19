@@ -9,7 +9,7 @@
 
 namespace nixl::ucx {
 
-enum class Platform {
+enum class GCPPlatform {
     UNKNOWN,
     A3_ULTRA, // a3-ultragpu-8g
     A4,       // a4-highgpu-8g
@@ -23,30 +23,30 @@ enum class Platform {
 // -------------------------------------------------------------
 // CONFIG FILE: Map platform identifiers to their UCX modifiers
 // -------------------------------------------------------------
-inline const std::unordered_map<Platform, std::vector<std::pair<std::string, std::string>>> platform_configs = {
-    { Platform::A3_ULTRA, { 
+inline const std::unordered_map<GCPPlatform, std::vector<std::pair<std::string, std::string>>> platform_configs = {
+    { GCPPlatform::A3_ULTRA, { 
         {"SINGLE_NET_DEVICE", "y"}, 
         {"MAX_RMA_RAILS", "2"} 
     }}, 
-    { Platform::A4, { 
+    { GCPPlatform::A4, { 
         {"SINGLE_NET_DEVICE", "y"}, 
         {"MAX_RMA_RAILS", "2"} 
     }}, 
-    { Platform::A4X,      { } },
-    { Platform::A3_MEGA,  { } },
-    { Platform::A3_HIGH,  { } },
-    { Platform::A4X_MAX,  { } },
-    { Platform::A5X,      { } }
+    { GCPPlatform::A4X,      { } },
+    { GCPPlatform::A3_MEGA,  { } },
+    { GCPPlatform::A3_HIGH,  { } },
+    { GCPPlatform::A4X_MAX,  { } },
+    { GCPPlatform::A5X,      { } }
 };
 
-inline const std::unordered_map<std::string, Platform> platform_strings = {
-    {"a3-ultragpu-8g", Platform::A3_ULTRA},
-    {"a4-highgpu-8g",  Platform::A4},
-    {"a4x-highgpu-4g", Platform::A4X},
-    {"a3-megagpu-8g",  Platform::A3_MEGA},
-    {"a3-highgpu-8g",  Platform::A3_HIGH},
-    {"a4x-maxgpu-4g-metal", Platform::A4X_MAX},
-    {"a5x",            Platform::A5X}
+inline const std::unordered_map<std::string, GCPPlatform> platform_strings = {
+    {"a3-ultragpu-8g", GCPPlatform::A3_ULTRA},
+    {"a4-highgpu-8g",  GCPPlatform::A4},
+    {"a4x-highgpu-4g", GCPPlatform::A4X},
+    {"a3-megagpu-8g",  GCPPlatform::A3_MEGA},
+    {"a3-highgpu-8g",  GCPPlatform::A3_HIGH},
+    {"a4x-maxgpu-4g-metal", GCPPlatform::A4X_MAX},
+    {"a5x",            GCPPlatform::A5X}
 };
 
 // Detects cloud provider and platform, applying associated UCX overrides
