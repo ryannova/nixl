@@ -15,7 +15,9 @@ enum class Platform {
     A4,       // a4-highgpu-8g
     A4X,      // a4x-highgpu-4g
     A3_MEGA,  // a3-megagpu-8g
-    A3_HIGH   // a3-highgpu-8g
+    A3_HIGH,  // a3-highgpu-8g
+    A4X_MAX,  // a4x-maxgpu-4g-metal
+    A5X       // a5x
 };
 
 // -------------------------------------------------------------
@@ -32,7 +34,9 @@ inline const std::unordered_map<Platform, std::vector<std::pair<std::string, std
     }}, 
     { Platform::A4X,      { } },
     { Platform::A3_MEGA,  { } },
-    { Platform::A3_HIGH,  { } }
+    { Platform::A3_HIGH,  { } },
+    { Platform::A4X_MAX,  { } },
+    { Platform::A5X,      { } }
 };
 
 inline const std::unordered_map<std::string, Platform> platform_strings = {
@@ -40,7 +44,9 @@ inline const std::unordered_map<std::string, Platform> platform_strings = {
     {"a4-highgpu-8g",  Platform::A4},
     {"a4x-highgpu-4g", Platform::A4X},
     {"a3-megagpu-8g",  Platform::A3_MEGA},
-    {"a3-highgpu-8g",  Platform::A3_HIGH}
+    {"a3-highgpu-8g",  Platform::A3_HIGH},
+    {"a4x-maxgpu-4g-metal", Platform::A4X_MAX},
+    {"a5x",            Platform::A5X}
 };
 
 // Detects cloud provider and platform, applying associated UCX overrides
