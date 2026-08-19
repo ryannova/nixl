@@ -21,14 +21,14 @@ enum class GCPPlatform {
 };
 
 struct GCPPlatformId {
-    static constexpr const char* kNvidiaVendorId = "0x10de";
-    static constexpr const char* kA3Id = "0x2331";      // A3
-    static constexpr const char* kA3MId = "0x2330";     // A3 Mega
-    static constexpr const char* kA3UId = "0x2335";     // A3 Ultra
-    static constexpr const char* kA4Id = "0x2901";      // A4
-    static constexpr const char* kA4XId = "0x2941";     // A4X
-    static constexpr const char* kA4XMaxId = "0x31c2";  // A4Xmax
-    static constexpr const char* kA5XId = "0x3041";     // A5X
+    static constexpr int kNvidiaVendorId = 0x10de;
+    static constexpr int kA3Id = 0x2331;      // A3
+    static constexpr int kA3MId = 0x2330;     // A3 Mega
+    static constexpr int kA3UId = 0x2335;     // A3 Ultra
+    static constexpr int kA4Id = 0x2901;      // A4
+    static constexpr int kA4XId = 0x2941;     // A4X
+    static constexpr int kA4XMaxId = 0x31c2;  // A4Xmax
+    static constexpr int kA5XId = 0x3041;     // A5X
 };
 
 // -------------------------------------------------------------
