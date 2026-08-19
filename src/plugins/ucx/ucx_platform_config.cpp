@@ -104,8 +104,8 @@ void applyPlatformSpecificFlags(const config& config) {
             GCPPlatform plat = DetectPlatformViaSysfs();
             if (plat != GCPPlatform::UNKNOWN) {
                 NIXL_DEBUG << "Detected GCP platform via sysfs, applying UCX overrides.";
-                auto it = platform_configs.find(plat);
-                if (it != platform_configs.end()) {
+                auto it = gcp_platform_config.find(plat);
+                if (it != gcp_platform_config.end()) {
                     for (const auto& kv : it->second) {
                         config.modify(kv.first, kv.second);
                     }

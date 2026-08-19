@@ -23,7 +23,7 @@ enum class GCPPlatform {
 // -------------------------------------------------------------
 // CONFIG FILE: Map platform identifiers to their UCX modifiers
 // -------------------------------------------------------------
-inline const std::unordered_map<GCPPlatform, std::vector<std::pair<std::string, std::string>>> platform_configs = {
+inline const std::unordered_map<GCPPlatform, std::vector<std::pair<std::string, std::string>>> gcp_platform_config = {
     { GCPPlatform::A3_ULTRA, { 
         {"SINGLE_NET_DEVICE", "y"}, 
         {"MAX_RMA_RAILS", "2"} 
@@ -39,7 +39,7 @@ inline const std::unordered_map<GCPPlatform, std::vector<std::pair<std::string, 
     { GCPPlatform::A5X,      { } }
 };
 
-inline const std::unordered_map<std::string, GCPPlatform> platform_strings = {
+inline const std::unordered_map<std::string, GCPPlatform> gcp_platform_strings = {
     {"a3-ultragpu-8g", GCPPlatform::A3_ULTRA},
     {"a4-highgpu-8g",  GCPPlatform::A4},
     {"a4x-highgpu-4g", GCPPlatform::A4X},
