@@ -39,15 +39,6 @@ inline const std::unordered_map<GCPPlatform, std::vector<std::pair<std::string, 
     { GCPPlatform::A5X,      { } }
 };
 
-inline const std::unordered_map<std::string, GCPPlatform> gcp_platform_strings = {
-    {"a3-ultragpu-8g", GCPPlatform::A3_ULTRA},
-    {"a4-highgpu-8g",  GCPPlatform::A4},
-    {"a4x-highgpu-4g", GCPPlatform::A4X},
-    {"a3-megagpu-8g",  GCPPlatform::A3_MEGA},
-    {"a3-highgpu-8g",  GCPPlatform::A3_HIGH},
-    {"a4x-maxgpu-4g-metal", GCPPlatform::A4X_MAX},
-    {"a5x",            GCPPlatform::A5X}
-};
 
 // Detects cloud provider and platform, applying associated UCX overrides
 void applyPlatformSpecificFlags(const config& config);
