@@ -48,8 +48,8 @@ class nixlBackendEngine {
         // Members that cannot be modified by a child backend and parent bookkeep
         nixl_backend_t  backendType;
         nixl_b_params_t customParams;
-        std::vector<nixlTelemetryEvent> telemetryEvents_;
-        std::mutex telemetryEventsMutex_;
+        mutable std::vector<nixlTelemetryEvent> telemetryEvents_;
+        mutable std::mutex telemetryEventsMutex_;
         const nixl_backend_capability_t capabilities_;
 
     protected:
@@ -76,7 +76,7 @@ class nixlBackendEngine {
         }
 
         void
-        addTelemetryEvent(nixl_telemetry_event_type_t event_type, uint64_t value) {
+        addTelemetryEvent(nixl_telemetry_event_type_t event_type, uint64_t value) const {
             if (!enableTelemetry_) {
                 return;
             }
@@ -109,7 +109,9 @@ class nixlBackendEngine {
         std::vector<nixlTelemetryEvent>
         getTelemetryEvents() {
             std::lock_guard<std::mutex> lock(telemetryEventsMutex_);
-            return std::move(telemetryEvents_);
+            std::vector<nixlTelemetryEvent> drained;
+            drained.swap(telemetryEvents_);
+            return drained;
         }
 
         bool getInitErr() const noexcept { return initErr; }

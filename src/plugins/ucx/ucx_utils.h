@@ -169,6 +169,7 @@ private:
     const nixl_ucx_vram_memtype_hint_t vramMemTypeHintPolicy_;
     uint64_t supportedMemoryTypesMask_{0};
     ucs_memory_type_t vramMemTypeHint_{UCS_MEMORY_TYPE_UNKNOWN};
+    uint64_t configFlagsBitmask_{0};
 
     void
     resolveMemoryTypeConfig();
@@ -209,6 +210,11 @@ public:
 
     void
     warnAboutHardwareSupportMismatch() const;
+
+    [[nodiscard]] uint64_t
+    getConfigFlagsBitmask() const noexcept {
+        return configFlagsBitmask_;
+    }
 
     friend class nixlUcxWorker;
 };

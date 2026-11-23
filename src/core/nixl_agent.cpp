@@ -441,6 +441,9 @@ nixlAgentData::~nixlAgentData() {
     // Runs before any member is destroyed, so no metadata backend thread can
     // still be in the caches below.
     md_.stop();
+    if (telemetry_) {
+        telemetry_->clearBackendEventSources();
+    }
 }
 
 /*** nixlAgent implementation ***/
@@ -634,7 +637,12 @@ nixlAgent::createBackend(const nixl_backend_t &type,
     if (trace_sink != nullptr) {
         data->traceSinks_.insert_or_assign(type, std::move(trace_sink));
     }
+    nixlBackendEngine *backend_raw = backend.get();
     data->backendEngines_.try_emplace(type, std::move(backend));
+    if (data->telemetry_) {
+        data->telemetry_->registerBackendEventSource(
+            [backend_raw]() { return backend_raw->getTelemetryEvents(); });
+    }
 
     // TODO: Check if backend supports ProgThread
     //       when threading is in agent
@@ -1473,6 +1481,7 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         if (req_hndl->status < 0) {
             data->addErrorTelemetry(req_hndl->status);
         } else if (req_hndl->status == NIXL_IN_PROG) {
+            data->recordInflightDelta(+1);
             req_hndl->updateRequestStats(data->telemetry_.get(), NIXL_TELEMETRY_POST);
         } else {
             req_hndl->updateRequestStats(data->telemetry_.get(), NIXL_TELEMETRY_POST_AND_FINISH);
@@ -1494,10 +1503,15 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
         if (req_hndl->remoteSection.expired()) {
             NIXL_ERROR_FUNC << "remote agent '" << req_hndl->remoteAgent
                             << "' was invalidated or re-registered during transfer";
+            data->recordInflightDelta(-1);
+            data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
             return NIXL_ERR_NOT_FOUND;
         }
 
         req_hndl->status = req_hndl->engine->checkXfer(req_hndl->backendHandle);
+        if (req_hndl->status != NIXL_IN_PROG) {
+            data->recordInflightDelta(-1);
+        }
         if (req_hndl->status < 0) {
             traceXferError(data->tracer_.get(), *req_hndl, req_hndl->status);
             if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {

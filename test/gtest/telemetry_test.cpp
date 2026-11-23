@@ -502,7 +502,7 @@ TEST_F(telemetryTest, AddXferStatsRxBranch) {
 TEST_F(telemetryTest, TelemetryEventStructure) {
     nixlTelemetryEvent event1(nixl_telemetry_event_type_t::AGENT_TX_BYTES, 42);
 
-    EXPECT_EQ(TELEMETRY_VERSION, 6);
+    EXPECT_EQ(TELEMETRY_VERSION, 7);
     EXPECT_EQ(sizeof(nixlTelemetryEvent), 16);
     EXPECT_EQ(event1.value_, 42);
     EXPECT_EQ(event1.eventType_, nixl_telemetry_event_type_t::AGENT_TX_BYTES);
@@ -531,14 +531,30 @@ TEST(telemetryMetricContract, DescriptorIsUnifiedExporterSeriesContract) {
         {et::AGENT_XFER_TIME, "agent_xfer_time_total", "agent_xfer_time"},
         {et::AGENT_XFER_POST_TIME, "agent_xfer_post_time_total", "agent_xfer_post_time"},
         {et::AGENT_TRACE_PHASES_DROPPED, "agent_trace_phases_dropped_total", nullptr},
+        {et::AGENT_DEVICE_ADDR_VALID, nullptr, "agent_device_addr_valid"},
+        {et::AGENT_DEVICE_MTU_BYTES, nullptr, "agent_device_mtu_bytes"},
+        {et::AGENT_DEVICE_AFFINITY, nullptr, "agent_device_affinity"},
+        {et::AGENT_CONFIG_FLAG_STATE, nullptr, "agent_config_flag_state"},
+        {et::AGENT_CONN_ESTABLISHED, "agent_conn_established_total", nullptr},
+        {et::AGENT_CONN_PATH_MODE, nullptr, "agent_conn_path_mode"},
+        {et::AGENT_CONN_RAIL_COUNT, nullptr, "agent_conn_rail_count"},
+        {et::AGENT_CONN_LOCALITY_MISMATCH, "agent_conn_locality_mismatch_total", nullptr},
+        {et::AGENT_CONN_FALLBACK, "agent_conn_fallback_total", nullptr},
+        {et::AGENT_XFER_WIRE_TIME, "agent_xfer_wire_time_total", "agent_xfer_wire_time"},
+        {et::AGENT_XFER_POLL_DELAY, "agent_xfer_poll_delay_total", "agent_xfer_poll_delay"},
+        {et::AGENT_XFER_INFLIGHT, nullptr, "agent_xfer_inflight"},
         {et::AGENT_TELEMETRY_EVENTS_DROPPED, "agent_telemetry_events_dropped_total", nullptr},
     };
 
     ASSERT_EQ(contract.size(), telemetry_metric_event_types.size());
     for (const auto &expected : contract) {
         const auto descriptor = nixlEnumStrings::telemetryMetricDescriptor(expected.type);
-        ASSERT_NE(descriptor.counterName, nullptr);
-        EXPECT_EQ(std::string(descriptor.counterName), expected.counter);
+        if (expected.counter == nullptr) {
+            EXPECT_EQ(descriptor.counterName, nullptr);
+        } else {
+            ASSERT_NE(descriptor.counterName, nullptr);
+            EXPECT_EQ(std::string(descriptor.counterName), expected.counter);
+        }
         if (expected.gauge == nullptr) {
             EXPECT_EQ(descriptor.gaugeName, nullptr);
         } else {
@@ -549,9 +565,11 @@ TEST(telemetryMetricContract, DescriptorIsUnifiedExporterSeriesContract) {
 
     for (const auto type : telemetry_metric_event_types) {
         const auto descriptor = nixlEnumStrings::telemetryMetricDescriptor(type);
-        ASSERT_NE(descriptor.counterName, nullptr);
-        const std::string counter(descriptor.counterName);
-        EXPECT_EQ(counter.substr(counter.size() - std::string("_total").size()), "_total");
+        EXPECT_TRUE(descriptor.counterName != nullptr || descriptor.gaugeName != nullptr);
+        if (descriptor.counterName != nullptr) {
+            const std::string counter(descriptor.counterName);
+            EXPECT_EQ(counter.substr(counter.size() - std::string("_total").size()), "_total");
+        }
     }
 
     for (const auto type : telemetry_error_event_types) {

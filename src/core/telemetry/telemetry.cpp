@@ -279,11 +279,28 @@ bool
 nixlTelemetry::flushPendingEvents() {
     const auto pending = stagingQueue_.drainPending();
 
+    std::vector<nixlTelemetryEvent> backend_events;
+    {
+        std::lock_guard<std::mutex> lock(backendSourcesMutex_);
+        for (const auto &drain_fn : backendSources_) {
+            auto drained = drain_fn();
+            backend_events.insert(backend_events.end(),
+                                  std::make_move_iterator(drained.begin()),
+                                  std::make_move_iterator(drained.end()));
+        }
+    }
+
     exporter_->withBatch([&] {
         for (const auto &event : pending) {
             // Deactivated metrics never enter the queue (filtered at the source),
             // so everything here is already exportable.
             exporter_->exportEvent(event);
+        }
+
+        for (const auto &event : backend_events) {
+            if (isMetricEnabled(event.eventType_)) {
+                exporter_->exportEvent(event);
+            }
         }
 
         exportDroppedEvents();
@@ -387,6 +404,39 @@ nixlTelemetry::updateMemoryDeregistered(uint64_t memory_deregistered) {
 void
 nixlTelemetry::updateTracePhasesDropped(uint64_t trace_phases_dropped) noexcept {
     tracePhasesDropped_.fetch_add(trace_phases_dropped, std::memory_order_relaxed);
+}
+
+void
+nixlTelemetry::updateInflight(uint64_t inflight) {
+    updateData(nixl_telemetry_event_type_t::AGENT_XFER_INFLIGHT, inflight);
+}
+
+void
+nixlTelemetry::recordBackendEvent(nixl_telemetry_event_type_t event_type, uint64_t value) {
+    updateData(event_type, value);
+}
+
+void
+nixlTelemetry::registerBackendEventSource(backendDrainFn drain_fn) {
+    if (!drain_fn) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(backendSourcesMutex_);
+    backendSources_.push_back(std::move(drain_fn));
+}
+
+void
+nixlTelemetry::clearBackendEventSources() {
+    std::vector<backendDrainFn> removed;
+    {
+        std::lock_guard<std::mutex> lock(backendSourcesMutex_);
+        removed.swap(backendSources_);
+    }
+    for (const auto &drain_fn : removed) {
+        for (const auto &event : drain_fn()) {
+            updateData(event.eventType_, event.value_);
+        }
+    }
 }
 
 void

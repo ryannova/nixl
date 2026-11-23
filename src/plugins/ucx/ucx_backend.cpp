@@ -30,8 +30,15 @@
 
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string.h>
 #include "absl/strings/str_split.h"
 
@@ -148,6 +155,395 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params, size_t nu
     auto &worker = workers_.front();
     workerAddr = worker->epAddr();
     worker->regAmCallback(nixl::ucx::am_cb_op_t::NOTIF_STR, notifAmCb, this);
+    emitInitTelemetry();
+}
+
+void
+nixlUcxEngine::emitInitTelemetry() const {
+    if (!enableTelemetry_) {
+        return;
+    }
+    addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONFIG_FLAG_STATE,
+                      uc->getConfigFlagsBitmask());
+
+    namespace fs = std::filesystem;
+    bool found_ib = false;
+    bool all_gids_valid = true;
+    uint64_t min_mtu = 0;
+
+    auto readTrimmed = [](const fs::path &p) -> std::string {
+        std::ifstream f(p);
+        if (!f) return {};
+        std::string s;
+        std::getline(f, s);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) {
+            s.pop_back();
+        }
+        return s;
+    };
+
+    std::error_code ec;
+    const fs::path ib_root("/sys/class/infiniband");
+    if (fs::exists(ib_root, ec) && fs::is_directory(ib_root, ec)) {
+        for (const auto &dev : fs::directory_iterator(ib_root, ec)) {
+            const fs::path port_dir = dev.path() / "ports" / "1";
+            const std::string state = readTrimmed(port_dir / "state");
+            if (state.find("ACTIVE") == std::string::npos) {
+                continue;
+            }
+            found_ib = true;
+            // Linux /sys/class/infiniband/<dev>/ports/1/ does not expose an `active_mtu` file on
+            // standard rdma-core kernels. Resolve the RoCEv2 netdev MTU via gid_attrs/ndevs/3
+            // (or device/net/<iface>/mtu) which reports jumbo Ethernet MTU (e.g. 8896) vs 1500.
+            auto recordMtu = [&](const std::string &mtu_str) {
+                if (mtu_str.empty()) return;
+                const uint64_t mtu_val = std::strtoull(mtu_str.c_str(), nullptr, 10);
+                if (mtu_val > 0 && (min_mtu == 0 || mtu_val < min_mtu)) {
+                    min_mtu = mtu_val;
+                }
+            };
+            const std::string ndev = readTrimmed(port_dir / "gid_attrs" / "ndevs" / "3");
+            if (!ndev.empty()) {
+                recordMtu(readTrimmed(fs::path("/sys/class/net") / ndev / "mtu"));
+            } else {
+                const fs::path net_dir = dev.path() / "device" / "net";
+                if (fs::exists(net_dir, ec) && fs::is_directory(net_dir, ec)) {
+                    for (const auto &iface : fs::directory_iterator(net_dir, ec)) {
+                        recordMtu(readTrimmed(iface.path() / "mtu"));
+                    }
+                }
+            }
+            // A zeroed or missing RoCEv2 GID index 3 indicates an unbound/stale RDMA IP address.
+            const std::string gid3 = readTrimmed(port_dir / "gids" / "3");
+            if (gid3.empty() || gid3 == "0000:0000:0000:0000:0000:0000:0000:0000") {
+                all_gids_valid = false;
+                NIXL_WARN << "UCX telemetry: zero or missing RoCEv2 GID[3] on "
+                          << dev.path().filename().string();
+            }
+        }
+    }
+
+    if (!found_ib) {
+        // Fallback: inspect active non-loopback ethernet interface MTU via sysfs.
+        const fs::path net_root("/sys/class/net");
+        for (const auto &entry : fs::directory_iterator(net_root, ec)) {
+            const std::string iface = entry.path().filename().string();
+            if (iface == "lo") continue;
+            const std::string oper = readTrimmed(entry.path() / "operstate");
+            if (oper != "up" && oper != "unknown") continue;
+            const std::string mtu_str = readTrimmed(entry.path() / "mtu");
+            const uint64_t mtu_val = std::strtoull(mtu_str.c_str(), nullptr, 10);
+            if (mtu_val > 0 && (min_mtu == 0 || mtu_val < min_mtu)) {
+                min_mtu = mtu_val;
+            }
+        }
+    }
+
+    addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_DEVICE_ADDR_VALID,
+                      found_ib ? (all_gids_valid ? 1ULL : 0ULL) : (min_mtu > 0 ? 1ULL : 0ULL));
+    if (min_mtu > 0) {
+        addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_DEVICE_MTU_BYTES, min_mtu);
+    }
+    addTelemetryEvent(
+        nixl_telemetry_event_type_t::AGENT_DEVICE_AFFINITY,
+        static_cast<uint64_t>(found_ib ? nixl_device_affinity_t::NODE :
+                                         nixl_device_affinity_t::UNKNOWN));
+}
+
+void
+nixlUcxEngine::emitEndpointTelemetry(const std::string &remote_agent, ucp_ep_h ep) const {
+    if (!enableTelemetry_ || ep == nullptr) {
+        return;
+    }
+    addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_ESTABLISHED, 1);
+
+    std::array<ucp_transport_entry_t, 16> entries{};
+    ucp_ep_attr_t attr{};
+    attr.field_mask = UCP_EP_ATTR_FIELD_TRANSPORTS;
+    attr.transports.entries = entries.data();
+    attr.transports.num_entries = entries.size();
+    attr.transports.entry_size = sizeof(ucp_transport_entry_t);
+
+    if (ucp_ep_query(ep, &attr) != UCS_OK) {
+        return;
+    }
+
+    std::set<std::string> net_devices;
+    bool has_rdma = false;
+    bool has_tcp = false;
+    bool has_cuda_ipc = false;
+    bool has_shm = false;
+    const unsigned count = std::min<unsigned>(attr.transports.num_entries, entries.size());
+    for (unsigned i = 0; i < count; ++i) {
+        const std::string tl = entries[i].transport_name ? entries[i].transport_name : "";
+        const std::string dev = entries[i].device_name ? entries[i].device_name : "";
+        if (tl.starts_with("rc_") || tl.starts_with("dc_") || tl.starts_with("ud_") ||
+            tl.starts_with("srd")) {
+            has_rdma = true;
+            // Strip ":port" suffix so two QPs on mlx5_0:1 count as 1 unique rail.
+            const auto colon = dev.find(':');
+            net_devices.insert(colon == std::string::npos ? dev : dev.substr(0, colon));
+        } else if (tl == "tcp") {
+            has_tcp = true;
+            if (!dev.empty() && dev != "memory") {
+                net_devices.insert(dev);
+            }
+        } else if (tl.find("cuda_ipc") != std::string::npos) {
+            has_cuda_ipc = true;
+        } else if (tl == "cma" || tl == "posix" || tl == "sysv" || tl == "knem" || tl == "xpmem" ||
+                   tl == "self") {
+            has_shm = true;
+        }
+    }
+
+    addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_RAIL_COUNT, net_devices.size());
+
+    nixl_conn_path_mode_t mode = nixl_conn_path_mode_t::IPC_LOCAL;
+    if (has_rdma) {
+        mode = nixl_conn_path_mode_t::DIRECT_RDMA;
+    } else if (has_cuda_ipc || has_shm) {
+        mode = nixl_conn_path_mode_t::IPC_LOCAL;
+    } else if (has_tcp) {
+        mode = nixl_conn_path_mode_t::FALLBACK_TCP;
+        addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_FALLBACK, 1);
+    }
+    lastPathMode_.store(static_cast<uint64_t>(mode), std::memory_order_relaxed);
+    addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_PATH_MODE,
+                      static_cast<uint64_t>(mode));
+
+    // Note: ucp_ep_query() reports all candidate device lanes wired on the endpoint
+    // (e.g. all 8 NICs on a multi-rail host). Active per-GPU RMA rail count and cross-NUMA
+    // mismatch are refined from the ..inf row in inspectWorkerRmaProtoTelemetry().
+    lastActiveRails_.store(net_devices.size(), std::memory_order_relaxed);
+    NIXL_DEBUG << "UCX telemetry connect peer=" << remote_agent
+               << " rails=" << net_devices.size()
+               << " path_mode=" << static_cast<uint64_t>(mode)
+               << " transports=" << count;
+}
+
+void
+nixlUcxEngine::inspectWorkerRmaProtoTelemetry(ucp_worker_h worker) const {
+    if (!enableTelemetry_ || worker == nullptr) {
+        return;
+    }
+    if (protoV2CudaInspected_.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // Check quickly once per worker for host-only, and keep inspecting until we see
+    // the first CUDA rkey_config table if CUDA is active (rate-limited via atomic flag).
+    static thread_local uint64_t check_count = 0;
+    if (protoV2HostInspected_.load(std::memory_order_relaxed) && (++check_count % 64 != 1)) {
+        return;
+    }
+    // Zero-disk-I/O in-memory proto_v2 check. Note: stock OpenUCX 1.23.0 populates
+    // worker->rkey_config tables when UCX_PROTO_INFO=y or a glob (e.g. "*remote memory*"),
+    // or always if openucx/ucx ucp_rkey.c:1306 passes show_all=1.
+    char *buf = nullptr;
+    size_t sz = 0;
+    FILE *ms = ::open_memstream(&buf, &sz);
+    if (ms == nullptr) {
+        return;
+    }
+    ucp_worker_print_info(worker, ms);
+    ::fclose(ms);
+    if (buf == nullptr) {
+        return;
+    }
+
+    auto readNuma = [](const std::string &ib_dev) -> int {
+        std::ifstream f("/sys/class/infiniband/" + ib_dev + "/device/numa_node");
+        int node = -1;
+        if (f >> node) {
+            return node;
+        }
+        return -1;
+    };
+
+    const std::string_view info(buf, sz);
+    size_t search_pos = 0;
+    bool saw_host_get = false;
+    bool saw_cuda_get = false;
+    bool host_emulated = false;
+    bool host_emulated_tcp = false;
+    bool host_zcopy_rdma = false;
+    bool cuda_emulated = false;
+    bool cuda_emulated_tcp = false;
+    bool cuda_zcopy_rdma = false;
+    std::set<std::string> cuda_rdma_devs;
+    std::set<std::string> host_rdma_devs;
+    std::set<std::string> cuda_tcp_devs;
+    std::set<std::string> host_tcp_devs;
+    int gpu_index_hint = -1;
+
+    while (true) {
+        const auto get_pos_r = info.find("ucp_get*", search_pos);
+        const auto put_pos_r = info.find("ucp_put*", search_pos);
+        const size_t get_pos = std::min(get_pos_r, put_pos_r);
+        if (get_pos == std::string_view::npos) {
+            break;
+        }
+        const auto header_eol = info.find('\n', get_pos);
+        const auto header_line = (header_eol == std::string_view::npos) ?
+            info.substr(get_pos) :
+            info.substr(get_pos, header_eol - get_pos);
+        // Match only true local-GPU CUDA tables ("cuda/GPU<N>"), never host-to-remote
+        // control tables ("from host memory to cuda/dev[0]") which always pick mlx5_0.
+        const auto gpu_tok = header_line.find("cuda/GPU");
+        const bool is_cuda_table = (gpu_tok != std::string_view::npos);
+        if (is_cuda_table) {
+            saw_cuda_get = true;
+            const int logical_gpu =
+                std::atoi(std::string(header_line.substr(gpu_tok + 8, 4)).c_str());
+            // Map logical CUDA index back to physical GPU index when CUDA_VISIBLE_DEVICES
+            // pins the process to a numeric list (e.g. CUDA_VISIBLE_DEVICES=4 -> GPU0 is phys 4).
+            int phys_gpu = logical_gpu;
+            if (const char *cvd = std::getenv("CUDA_VISIBLE_DEVICES")) {
+                if (cvd[0] != '\0') {
+                    std::vector<std::string> toks = absl::StrSplit(cvd, ',');
+                    if (logical_gpu >= 0 && static_cast<size_t>(logical_gpu) < toks.size()) {
+                        const std::string &t = toks[static_cast<size_t>(logical_gpu)];
+                        if (!t.empty() &&
+                            std::all_of(t.begin(), t.end(), [](unsigned char c) {
+                                return std::isdigit(c);
+                            })) {
+                            phys_gpu = std::atoi(t.c_str());
+                        }
+                    }
+                }
+            }
+            gpu_index_hint = phys_gpu;
+        } else {
+            saw_host_get = true;
+        }
+
+        // Skip the 3 border lines (`# +---...`): under title, under column headers, bottom border.
+        size_t end_pos = get_pos;
+        for (int sep = 0; sep < 3 && end_pos != std::string_view::npos; ++sep) {
+            end_pos = info.find("\n# +-", end_pos + 1);
+        }
+        const auto slice = info.substr(
+            get_pos, end_pos == std::string_view::npos ? 1024 : (end_pos - get_pos));
+        search_pos = (end_pos == std::string_view::npos) ? info.size() : end_pos;
+
+        // Inspect ONLY the `..inf` row(s) — optimal rc_mlx5 tables legitimately use
+        // `software emulation` for tiny 1..64B payloads and `zero-copy` for 65..inf!
+        std::istringstream rows{std::string(slice)};
+        std::string row;
+        while (std::getline(rows, row)) {
+            if (row.find("..inf") == std::string::npos) {
+                continue;
+            }
+            bool &emul = is_cuda_table ? cuda_emulated : host_emulated;
+            bool &emul_tcp = is_cuda_table ? cuda_emulated_tcp : host_emulated_tcp;
+            bool &zcopy = is_cuda_table ? cuda_zcopy_rdma : host_zcopy_rdma;
+            auto &devs = is_cuda_table ? cuda_rdma_devs : host_rdma_devs;
+            if (row.find("software emulation") != std::string::npos) {
+                if (row.find("tcp/") != std::string::npos) {
+                    emul_tcp = true;
+                } else {
+                    emul = true;
+                }
+            } else if (row.find("zero-copy") != std::string::npos &&
+                       row.find("mlx5_") != std::string::npos) {
+                zcopy = true;
+            }
+            // Extract every distinct IB device name (e.g. mlx5_0, mlx5_1) on the ..inf row.
+            size_t mpos = 0;
+            while ((mpos = row.find("mlx5_", mpos)) != std::string::npos) {
+                size_t mend = mpos + 5;
+                while (mend < row.size() && std::isdigit(static_cast<unsigned char>(row[mend]))) {
+                    ++mend;
+                }
+                if (mend > mpos + 5) {
+                    devs.insert(row.substr(mpos, mend - mpos));
+                }
+                mpos = mend;
+            }
+            // Extract active TCP interface names (e.g. tcp/eth0) for accurate fallback rail count.
+            auto &tdevs = is_cuda_table ? cuda_tcp_devs : host_tcp_devs;
+            size_t tpos = 0;
+            while ((tpos = row.find("tcp/", tpos)) != std::string::npos) {
+                size_t tend = tpos + 4;
+                while (tend < row.size() && row[tend] != ' ' && row[tend] != '|' &&
+                       row[tend] != ',' && row[tend] != '\t' && row[tend] != '\r') {
+                    ++tend;
+                }
+                if (tend > tpos + 4) {
+                    tdevs.insert(row.substr(tpos + 4, tend - (tpos + 4)));
+                }
+                tpos = tend;
+            }
+        }
+    }
+
+    const bool use_cuda = saw_cuda_get;
+    const bool inf_emulated = use_cuda ? cuda_emulated : host_emulated;
+    const bool inf_emulated_tcp = use_cuda ? cuda_emulated_tcp : host_emulated_tcp;
+    const bool inf_zcopy_rdma = use_cuda ? cuda_zcopy_rdma : host_zcopy_rdma;
+    const auto &active_rdma_devs = use_cuda ? cuda_rdma_devs : host_rdma_devs;
+    const auto &active_tcp_devs = use_cuda ? cuda_tcp_devs : host_tcp_devs;
+
+    if (!active_rdma_devs.empty()) {
+        const uint64_t rails = active_rdma_devs.size();
+        const uint64_t prev_rails = lastActiveRails_.exchange(rails, std::memory_order_relaxed);
+        if (prev_rails != rails) {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_RAIL_COUNT, rails);
+        }
+    } else if (inf_emulated_tcp && !active_tcp_devs.empty()) {
+        const uint64_t rails = active_tcp_devs.size();
+        const uint64_t prev_rails = lastActiveRails_.exchange(rails, std::memory_order_relaxed);
+        if (prev_rails != rails) {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_RAIL_COUNT, rails);
+        }
+    }
+    if (use_cuda && gpu_index_hint >= 0 && !active_rdma_devs.empty()) {
+        const std::string expected_nic = "mlx5_" + std::to_string(gpu_index_hint);
+        const bool exact_pair =
+            (active_rdma_devs.size() == 1 && active_rdma_devs.count(expected_nic) == 1);
+        if (!exact_pair) {
+            const int chosen_numa = readNuma(*active_rdma_devs.begin());
+            const int expected_numa = readNuma(expected_nic);
+            const bool cross_numa =
+                (chosen_numa >= 0 && expected_numa >= 0 && chosen_numa != expected_numa);
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_DEVICE_AFFINITY,
+                              static_cast<uint64_t>(cross_numa ? nixl_device_affinity_t::SYS :
+                                                                 nixl_device_affinity_t::NODE));
+            if (cross_numa || inf_emulated) {
+                addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_LOCALITY_MISMATCH, 1);
+            }
+        } else {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_DEVICE_AFFINITY,
+                              static_cast<uint64_t>(nixl_device_affinity_t::PIX));
+        }
+    }
+
+    if (inf_emulated) {
+        NIXL_WARN << "UCX telemetry: RMA ucp_get* large-range (..inf) uses proto_v2 "
+                     "'software emulation'";
+        const uint64_t prev = lastPathMode_.exchange(
+            static_cast<uint64_t>(nixl_conn_path_mode_t::EMULATED), std::memory_order_relaxed);
+        addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_PATH_MODE,
+                          static_cast<uint64_t>(nixl_conn_path_mode_t::EMULATED));
+        if (prev != static_cast<uint64_t>(nixl_conn_path_mode_t::EMULATED) &&
+            prev != static_cast<uint64_t>(nixl_conn_path_mode_t::FALLBACK_TCP)) {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_FALLBACK, 1);
+        }
+    } else if (inf_zcopy_rdma) {
+        addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_CONN_PATH_MODE,
+                          static_cast<uint64_t>(nixl_conn_path_mode_t::DIRECT_RDMA));
+        lastPathMode_.store(static_cast<uint64_t>(nixl_conn_path_mode_t::DIRECT_RDMA),
+                            std::memory_order_relaxed);
+    } else if (inf_emulated_tcp) {
+        NIXL_DEBUG << "UCX telemetry: RMA ucp_get* large-range uses software emulation over tcp";
+    }
+
+    if (saw_cuda_get) {
+        protoV2CudaInspected_.store(true, std::memory_order_relaxed);
+    }
+    if (saw_host_get) {
+        protoV2HostInspected_.store(true, std::memory_order_relaxed);
+    }
+    std::free(buf);
 }
 
 nixl_mem_list_t nixlUcxEngine::getSupportedMems () const {
@@ -214,6 +610,9 @@ nixl_status_t nixlUcxEngine::loadRemoteConnInfo (const std::string &remote_agent
         std::unique_ptr<nixlUcxEp> ep = uw->connect(addr.data());
         if (!ep) {
             return NIXL_ERR_BACKEND;
+        }
+        if (conn->eps.empty() && remote_agent != localAgent) {
+            emitEndpointTelemetry(remote_agent, ep->getEp());
         }
         conn->eps.push_back(std::move(ep));
     }
@@ -638,6 +1037,9 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
                            int_handle->traceExecution);
     }
     int_handle->setNotif(std::move(notif));
+    if (enableTelemetry_) {
+        int_handle->enableWireTiming(static_cast<uint64_t>(nixlTime::getUs()));
+    }
 
     ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
     if (ret != NIXL_SUCCESS) {
@@ -645,13 +1047,34 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
     }
 
     recordPhase(traceSink_, nixl_trace_phase_t::WIRE_SUBMITTED, *int_handle);
-    return int_handle->hasPendingRequests() ? NIXL_IN_PROG : int_handle->status();
+    const nixl_status_t post_status =
+        int_handle->hasPendingRequests() ? NIXL_IN_PROG : int_handle->status();
+    if (enableTelemetry_ && post_status == NIXL_SUCCESS) {
+        uint64_t wire_us = 0, poll_delay_us = 0;
+        if (int_handle->takeWireTiming(
+                static_cast<uint64_t>(nixlTime::getUs()), wire_us, poll_delay_us)) {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_XFER_WIRE_TIME, wire_us);
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_XFER_POLL_DELAY, poll_delay_us);
+        }
+        inspectWorkerRmaProtoTelemetry(int_handle->getWorker()->get());
+    }
+    return post_status;
 }
 
 nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
 {
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
-    return int_handle->status();
+    const nixl_status_t st = int_handle->status();
+    if (enableTelemetry_ && st == NIXL_SUCCESS) {
+        uint64_t wire_us = 0, poll_delay_us = 0;
+        if (int_handle->takeWireTiming(
+                static_cast<uint64_t>(nixlTime::getUs()), wire_us, poll_delay_us)) {
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_XFER_WIRE_TIME, wire_us);
+            addTelemetryEvent(nixl_telemetry_event_type_t::AGENT_XFER_POLL_DELAY, poll_delay_us);
+        }
+        inspectWorkerRmaProtoTelemetry(int_handle->getWorker()->get());
+    }
+    return st;
 }
 
 nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const

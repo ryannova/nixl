@@ -324,6 +324,17 @@ private:
     mutable std::atomic<size_t> sharedWorkerIndex_;
     const bool sglEnabled_;
     nixlBackendTraceSink *const traceSink_;
+    mutable std::atomic<bool> protoV2HostInspected_{false};
+    mutable std::atomic<bool> protoV2CudaInspected_{false};
+    mutable std::atomic<uint64_t> lastPathMode_{0};
+    mutable std::atomic<uint64_t> lastActiveRails_{0};
+
+    void
+    emitInitTelemetry() const;
+    void
+    emitEndpointTelemetry(const std::string &remote_agent, ucp_ep_h ep) const;
+    void
+    inspectWorkerRmaProtoTelemetry(ucp_worker_h worker) const;
 
     // Map of agent name to saved nixlUcxConnection info
     std::unordered_map<std::string, ucx_connection_ptr_t> remoteConnMap;

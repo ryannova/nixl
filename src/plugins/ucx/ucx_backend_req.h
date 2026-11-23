@@ -28,6 +28,7 @@
 
 #include "backend/backend_engine.h"
 #include "common/nixl_log.h"
+#include "common/nixl_time.h"
 
 #include "ucx_backend.h"
 #include "ucx_sgl.h"
@@ -54,6 +55,34 @@ public:
         conn_ = conn;
         ep_ = &ep;
         notifStatus_ = notif_.empty() ? NIXL_SUCCESS : NIXL_IN_PROG;
+        wireEndUs_.store(0, std::memory_order_relaxed);
+    }
+
+    void
+    enableWireTiming(uint64_t start_us) noexcept {
+        wireTimingEnabled_ = true;
+        wireStartUs_ = start_us;
+        wireEndUs_.store(0, std::memory_order_relaxed);
+        wireMetricsReported_ = false;
+    }
+
+    void
+    markWireDone(uint64_t end_us) noexcept {
+        uint64_t expected = 0;
+        wireEndUs_.compare_exchange_strong(expected, end_us, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool
+    takeWireTiming(uint64_t now_us, uint64_t &wire_us, uint64_t &poll_delay_us) noexcept {
+        if (!wireTimingEnabled_ || wireMetricsReported_) {
+            return false;
+        }
+        wireMetricsReported_ = true;
+        const uint64_t end_us = wireEndUs_.load(std::memory_order_acquire);
+        const uint64_t eff_end = (end_us != 0 && end_us >= wireStartUs_) ? end_us : now_us;
+        wire_us = (eff_end >= wireStartUs_) ? (eff_end - wireStartUs_) : 0;
+        poll_delay_us = (now_us >= eff_end) ? (now_us - eff_end) : 0;
+        return true;
     }
 
     [[nodiscard]] const nixlUcxEp &
@@ -83,9 +112,15 @@ public:
         nixlUcxReq req = nullptr;
         const bool has_notif = !notif_.empty();
         NIXL_ASSERT(has_notif == (notifStatus_ == NIXL_IN_PROG));
-        const nixl_status_t status = ep_->flushEp(req, has_notif ? flushCb : nullptr, this);
-        if (has_notif && (status == NIXL_SUCCESS)) {
-            sendNotif();
+        const bool want_cb = has_notif || wireTimingEnabled_;
+        const nixl_status_t status = ep_->flushEp(req, want_cb ? flushCb : nullptr, this);
+        if (status == NIXL_SUCCESS) {
+            if (wireTimingEnabled_) {
+                markWireDone(static_cast<uint64_t>(nixlTime::getUs()));
+            }
+            if (has_notif) {
+                sendNotif();
+            }
         }
 
         return append(status, req);
@@ -206,8 +241,12 @@ private:
 
     static void
     flushCb(void *, ucs_status_t status, void *user_data) {
-        if (status == UCS_OK) {
-            static_cast<nixlUcxBackendReqH *>(user_data)->sendNotif();
+        auto *req_h = static_cast<nixlUcxBackendReqH *>(user_data);
+        if (req_h->wireTimingEnabled_) {
+            req_h->markWireDone(static_cast<uint64_t>(nixlTime::getUs()));
+        }
+        if (status == UCS_OK && !req_h->notif_.empty()) {
+            req_h->sendNotif();
         }
     }
 
@@ -272,6 +311,10 @@ private:
     std::string notif_;
     std::atomic<nixlUcxReq> notifReq_{nullptr};
     std::atomic<nixl_status_t> notifStatus_{NIXL_SUCCESS};
+    bool wireTimingEnabled_{false};
+    bool wireMetricsReported_{false};
+    uint64_t wireStartUs_{0};
+    std::atomic<uint64_t> wireEndUs_{0};
 };
 
 #endif // NIXL_SRC_PLUGINS_UCX_UCX_BACKEND_REQ_H

@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 
+#include "telemetry_event.h"
 #include "ucx_utils.h"
+#include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -614,6 +617,77 @@ nixlUcxContext::nixlUcxContext(const std::vector<std::string> &devs,
     }
 
     config.validateTlsCudaSupport();
+
+    // Capture effective UCX config flags in memory (zero disk I/O; immune to
+    // caller setproctitle() overwriting /proc/self/environ).
+    {
+        char *cfg_buf = nullptr;
+        size_t cfg_sz = 0;
+        FILE *ms = ::open_memstream(&cfg_buf, &cfg_sz);
+        if (ms != nullptr) {
+            ucp_config_print(config.getUcpConfig(), ms, nullptr, UCS_CONFIG_PRINT_CONFIG);
+            ::fclose(ms);
+            if (cfg_buf != nullptr) {
+                std::istringstream cfg_stream(std::string(cfg_buf, cfg_sz));
+                std::string line;
+                while (std::getline(cfg_stream, line)) {
+                    const auto eq = line.find('=');
+                    if (eq == std::string::npos) {
+                        continue;
+                    }
+                    const std::string key = line.substr(0, eq);
+                    const std::string val = line.substr(eq + 1);
+                    if (key == "UCX_IB_PCI_RELAXED_ORDERING") {
+                        if (val == "y" || val == "on" || val == "try" || val == "yes") {
+                            configFlagsBitmask_ |= NIXL_CFG_FLAG_RELAXED_ORDERING;
+                        }
+                    } else if (key == "UCX_SINGLE_NET_DEVICE") {
+                        if (val == "y" || val == "on" || val == "yes") {
+                            configFlagsBitmask_ |= NIXL_CFG_FLAG_SINGLE_NET_DEVICE;
+                        }
+                    } else if (key == "UCX_PROTO_ENABLE") {
+                        if (val == "y" || val == "on" || val == "yes") {
+                            configFlagsBitmask_ |= NIXL_CFG_FLAG_PROTO_V2;
+                        }
+                    } else if (key == "UCX_MEMTYPE_CACHE") {
+                        if (val == "n" || val == "off" || val == "no") {
+                            configFlagsBitmask_ |= NIXL_CFG_FLAG_MEMTYPE_CACHE_OFF;
+                        }
+                    } else if (key == "UCX_IB_ROCE_REACHABILITY_MODE") {
+                        if (val == "all") {
+                            configFlagsBitmask_ |= NIXL_CFG_FLAG_ROCE_REACH_ALL;
+                        }
+                    }
+                }
+                std::free(cfg_buf);
+            }
+        }
+        // On host-only containers without IB/CUDA UCT modules, ucp_config_print omits
+        // module-specific keys; fall back to env vars so config_flag_state reflects
+        // explicit operator intent without reading /proc/self/environ.
+        auto env_is_enabled = [](const char *name) -> std::optional<bool> {
+            const char *v = std::getenv(name);
+            if (!v || !*v) return std::nullopt;
+            const std::string_view sv(v);
+            if (sv == "y" || sv == "on" || sv == "yes" || sv == "try" || sv == "1") return true;
+            if (sv == "n" || sv == "off" || sv == "no" || sv == "0") return false;
+            return std::nullopt;
+        };
+        if (const auto ro = env_is_enabled("UCX_IB_PCI_RELAXED_ORDERING")) {
+            if (*ro) configFlagsBitmask_ |= NIXL_CFG_FLAG_RELAXED_ORDERING;
+            else configFlagsBitmask_ &= ~NIXL_CFG_FLAG_RELAXED_ORDERING;
+        } else if ((configFlagsBitmask_ & NIXL_CFG_FLAG_RELAXED_ORDERING) == 0) {
+            // nixlUcxContext defaults IB_PCI_RELAXED_ORDERING="try" at line 570 above.
+            configFlagsBitmask_ |= NIXL_CFG_FLAG_RELAXED_ORDERING;
+        }
+        if (const auto mc = env_is_enabled("UCX_MEMTYPE_CACHE"); mc && !*mc) {
+            configFlagsBitmask_ |= NIXL_CFG_FLAG_MEMTYPE_CACHE_OFF;
+        }
+        if (const char *rm = std::getenv("UCX_IB_ROCE_REACHABILITY_MODE");
+            rm && std::string_view(rm) == "all") {
+            configFlagsBitmask_ |= NIXL_CFG_FLAG_ROCE_REACH_ALL;
+        }
+    }
 
     ucp_context_h new_ctx = nullptr;
     const auto status = ucp_init(&ucp_params, config.getUcpConfig(), &new_ctx);

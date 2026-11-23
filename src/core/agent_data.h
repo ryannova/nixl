@@ -63,6 +63,7 @@ class nixlAgentData final : public nixlMetadataContext {
 
         // The order of the following data members is crucial for destruction.
         std::unique_ptr<nixlTelemetry> telemetry_;
+        std::atomic<uint64_t> activeXfers_{0};
         // Composite tracer (fans out to every enabled backend); null when no
         // backend is active.
         const std::unique_ptr<nixl::trace::Tracer> tracer_;
@@ -132,6 +133,29 @@ class nixlAgentData final : public nixlMetadataContext {
             if (telemetry_) {
                 telemetry_->updateErrorCount(err_status);
             }
+        }
+
+        void
+        recordInflightDelta(int64_t delta) {
+            if (!telemetry_) {
+                return;
+            }
+            uint64_t next = 0;
+            if (delta > 0) {
+                next = activeXfers_.fetch_add(static_cast<uint64_t>(delta),
+                                              std::memory_order_relaxed) +
+                    static_cast<uint64_t>(delta);
+            } else if (delta < 0) {
+                uint64_t cur = activeXfers_.load(std::memory_order_relaxed);
+                while (cur > 0 &&
+                       !activeXfers_.compare_exchange_weak(
+                           cur, cur - 1, std::memory_order_relaxed)) {
+                }
+                next = (cur > 0) ? (cur - 1) : 0;
+            } else {
+                next = activeXfers_.load(std::memory_order_relaxed);
+            }
+            telemetry_->updateInflight(next);
         }
 
     friend class nixlAgent;

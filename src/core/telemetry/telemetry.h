@@ -28,6 +28,8 @@
 #include <chrono>
 #include <functional>
 #include <atomic>
+#include <mutex>
+#include <vector>
 
 #include <asio.hpp>
 
@@ -93,6 +95,16 @@ public:
      */
     void
     updateTracePhasesDropped(uint64_t trace_phases_dropped) noexcept;
+    void
+    updateInflight(uint64_t inflight);
+    void
+    recordBackendEvent(nixl_telemetry_event_type_t event_type, uint64_t value);
+
+    using backendDrainFn = std::function<std::vector<nixlTelemetryEvent>()>;
+    void
+    registerBackendEventSource(backendDrainFn drain_fn);
+    void
+    clearBackendEventSources();
     /**
      * @brief Records one completed transfer's stats as a single telemetry batch.
      *
@@ -165,6 +177,8 @@ private:
     // Trace-phase drops since the last flush. Outside the staging queue, so a
     // failing trace backend can neither crowd out other events nor lose its own.
     std::atomic<uint64_t> tracePhasesDropped_{0};
+    std::mutex backendSourcesMutex_;
+    std::vector<backendDrainFn> backendSources_;
     asio::thread_pool pool_;
     periodicTask writeTask_;
 };
